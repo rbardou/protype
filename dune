@@ -1,0 +1,3 @@
+(library
+ (name protype)
+ (public_name protype))
