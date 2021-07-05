@@ -46,6 +46,7 @@ module Version_map = Map.Make (Int)
 type _ t =
   | Unit: unit t
   | Bool: bool t
+  | Char: char t
   | Int: int t
   | Int32: int32 t
   | Int64: int64 t
@@ -111,6 +112,7 @@ type e = E: _ t -> e
 
 let unit = Unit
 let bool = Bool
+let char = Char
 let int = Int
 let int32 = Int32
 let int64 = Int64
@@ -234,6 +236,7 @@ let show_base_type version typ =
     | Convert _ | Versions _ -> assert false (* removed by [expand_head] *)
     | Unit -> "unit"
     | Bool -> "bool"
+    | Char -> "char"
     | Int -> "int"
     | Int32 -> "int32"
     | Int64 -> "int64"
@@ -307,6 +310,7 @@ let rec backward_compatible: 'a 'b. old: 'a t -> old_version: _ -> 'b t -> issue
         assert false (* we expanded those with [expand_head] *)
     | Unit, Unit
     | Bool, Bool
+    | Char, Char
     | Int, Int
     | Int32, Int32
     | Int64, Int64
@@ -315,6 +319,7 @@ let rec backward_compatible: 'a 'b. old: 'a t -> old_version: _ -> 'b t -> issue
         []
     | Unit, _
     | Bool, _
+    | Char, _
     | Int, _
     | Int32, _
     | Int64, _
@@ -543,6 +548,10 @@ let rec output_value: 'a. ?mode: _ -> ?context: _ -> (string -> unit) -> 'a t ->
       | Bool ->
           output_space_if_compact_variant ();
           out (string_of_bool value)
+      | Char ->
+          out "'";
+          out (String.escaped (String.make 1 value));
+          out "'"
       | Int ->
           output_number string_of_int "" 0 value
       | Int32 ->
@@ -649,6 +658,8 @@ let rec example_value: 'a. empty: bool -> 'a t -> 'a =
         ((): a)
     | Bool ->
         false
+    | Char ->
+        'x'
     | Int ->
         0
     | Int32 ->
@@ -717,7 +728,7 @@ let example_value ?(empty = false) typ =
 (* TODO: we could have [Pure] types to indicate that some values need not be copied. *)
 let rec copy_value: 'a. 'a t -> 'a -> 'a = fun (type a) (typ: a t) (value: a) ->
   match typ with
-    | Unit | Bool | Int | Int32 | Int64 | Float | String | Enum _ ->
+    | Unit | Bool | Char | Int | Int32 | Int64 | Float | String | Enum _ ->
         (* Note that we assume strings are immutable. *)
         (* For [Enum], we could get the id of [value] and find the value again in [cases],
            but this would not return a copy, so it would be useless. *)

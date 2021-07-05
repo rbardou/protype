@@ -59,6 +59,7 @@ module Version_map: Map.S with type key = version
 type _ t =
   | Unit: unit t
   | Bool: bool t
+  | Char: char t
   | Int: int t
   | Int32: int32 t
   | Int64: int64 t
@@ -134,6 +135,9 @@ val unit: unit t
 
 (** Type description for [bool]. *)
 val bool: bool t
+
+(** Type description for [char]. *)
+val char: char t
 
 (** Type description for [int32]. *)
 val int32: int32 t
