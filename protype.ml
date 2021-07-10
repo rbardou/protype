@@ -43,6 +43,8 @@ module Version = Int
 type version = Version.t
 module Version_map = Map.Make (Int)
 
+type _ annotation = ..
+
 type _ t =
   | Unit: unit t
   | Bool: bool t
@@ -81,6 +83,9 @@ type _ t =
       from: Version.t;
       current: 'a t;
     } -> 'a t
+  | Annotate: 'a annotation * 'a t -> 'a t
+  | Recursive: ('a t -> 'a t) -> 'a t
+  | Expanded_recursive: int * ('a t -> 'a t) -> 'a t
 
 and (_, _) fields =
   | R_field: {
@@ -218,22 +223,18 @@ type issue =
     kind: issue_kind;
   }
 
-let rec expand_head: 'a. _ -> 'a t -> e = fun version typ ->
-  match typ with
-    | Convert { typ; _ } ->
-        expand_head version typ
-    | Versions { old; from; current } ->
-        if version < from then
-          expand_head version old
-        else
-          expand_head version current
-    | _ ->
-        E typ
+let next_placeholder = ref 0
 
-let show_base_type version typ =
-  let E typ = expand_head version typ in
+let fresh_placeholder () =
+  let i = !next_placeholder in
+  incr next_placeholder;
+  i
+
+let expand_recursive f =
+  Expanded_recursive (fresh_placeholder (), f)
+
+let rec show_base_type: 'a. _ -> 'a t -> _ = fun (type a) version (typ: a t) ->
   match typ with
-    | Convert _ | Versions _ -> assert false (* removed by [expand_head] *)
     | Unit -> "unit"
     | Bool -> "bool"
     | Char -> "char"
@@ -248,6 +249,11 @@ let show_base_type version typ =
     | Record _ -> "record"
     | Enum _ -> "enum"
     | Variant _ -> "variant"
+    | Convert { typ; _ } -> show_base_type version typ
+    | Versions { current; _ } -> show_base_type version current
+    | Annotate (_, typ) -> show_base_type version typ
+    | Recursive f -> show_base_type version (f (expand_recursive f))
+    | Expanded_recursive (i, _) -> "rec#" ^ string_of_int i
 
 let show_issue { location; kind } =
   let location = show_location location in
@@ -297,17 +303,12 @@ let rec field_map: 'r 'f. _ -> _ -> ('r, 'f) fields -> _ =
 
 let rec backward_compatible: 'a 'b. old: 'a t -> old_version: _ -> 'b t -> issue list =
   fun (type a) (type b) ~(old: a t) ~old_version (current: b t) ->
-  let E old = expand_head old_version old in
-  let E current = expand_head old_version current in
   let incompatible_types () =
     issue (
       Incompatible_types (show_base_type old_version old, show_base_type old_version current)
     )
   in
   match old, current with
-    | (Convert _ | Versions _), _
-    | _, (Convert _ | Versions _) ->
-        assert false (* we expanded those with [expand_head] *)
     | Unit, Unit
     | Bool, Bool
     | Char, Char
@@ -382,6 +383,34 @@ let rec backward_compatible: 'a 'b. old: 'a t -> old_version: _ -> 'b t -> issue
         backward_compatible_variants old_version old_cases new_cases rename
     | Variant _, _ ->
         incompatible_types ()
+    | Convert { typ = old; _ }, _ ->
+        backward_compatible ~old ~old_version current
+    | _, Convert { typ = current; _ } ->
+        backward_compatible ~old ~old_version current
+    | Versions { current = old; _ }, _ ->
+        backward_compatible ~old ~old_version current
+    | _, Versions { current; _ } ->
+        backward_compatible ~old ~old_version current
+    | Annotate (_, old), _ ->
+        backward_compatible ~old ~old_version current
+    | _, Annotate (_, current) ->
+        backward_compatible ~old ~old_version current
+    | Recursive f, Recursive g ->
+        (* Unify those two type variables by giving them the same placeholder. *)
+        let placeholder = fresh_placeholder () in
+        backward_compatible ~old: (Expanded_recursive (placeholder, f)) ~old_version
+          (Expanded_recursive (placeholder, g))
+    | Recursive f, _ ->
+        backward_compatible ~old: (expand_recursive f) ~old_version current
+    | _, Recursive f ->
+        backward_compatible ~old ~old_version (expand_recursive f)
+    | Expanded_recursive (a, _), Expanded_recursive (b, _) ->
+        if a <> b then
+          incompatible_types ()
+        else
+          []
+    | Expanded_recursive _, _ ->
+        incompatible_types ()
 
 and backward_compatible_records:
   'ra 'fa 'rb 'fb. _ -> ('ra, 'fa) fields -> ('rb, 'fb) fields -> _ -> _ -> _ =
@@ -442,6 +471,66 @@ and backward_compatible_variants:
   in
   Id_map.merge merge_cases old_cases new_cases
   |> Id_map.bindings |> List.map snd |> List.flatten
+
+let annotate annotation typ =
+  Annotate (annotation, typ)
+
+type 'a annotation_equality =
+  {
+    equal: 'b. 'b -> 'b annotation -> 'a option;
+  }
+
+let find_all (type a) (type b) (annotation_equality: a annotation_equality)
+    (typ: b t) (value: b) =
+  let rec find_all: 'c. a list -> 'c t -> 'c -> a list =
+    fun (type c) (acc: a list) (typ: c t) (value: c) ->
+      match typ with
+        | Unit | Bool | Char | Int | Int32 | Int64 | Float | String | Enum _ ->
+            acc
+        | Option t ->
+            (
+              match value with
+                | None ->
+                    acc
+                | Some x ->
+                    find_all acc t x
+            )
+        | Array t ->
+            Array.fold_left (fun acc x -> find_all acc t x) acc value
+        | List t ->
+            List.fold_left (fun acc x -> find_all acc t x) acc value
+        | Record { fields; _ } ->
+            let rec find_all_in_fields: 'f. a list -> (c, 'f) fields -> a list =
+              fun (type f) (acc: a list) (fields: (c, f) fields) ->
+                match fields with
+                  | R_field { typ; get; next; _ } ->
+                      let acc = find_all acc typ (get value) in
+                      find_all_in_fields acc next
+                  | R_last { typ; get; _ } ->
+                      find_all acc typ (get value)
+            in
+            find_all_in_fields acc fields
+        | Variant { get; _ } ->
+            let Value ({ typ; _ }, x) = get value in
+            find_all acc typ x
+        | Convert { typ; encode; _ } ->
+            find_all acc typ (encode value)
+        | Versions { current; _ } ->
+            find_all acc current value
+        | Annotate (annotation, typ) ->
+            (
+              match annotation_equality.equal value annotation with
+                | None ->
+                    find_all acc typ value
+                | Some found ->
+                    found :: acc
+            )
+        | Recursive f | Expanded_recursive (_, f) ->
+            find_all acc (f typ) value
+  in
+  find_all [] typ value
+
+let recursive f = Recursive f
 
 type output_mode =
   | Compact
@@ -645,6 +734,10 @@ let rec output_value: 'a. ?mode: _ -> ?context: _ -> (string -> unit) -> 'a t ->
           output_value ~mode ~context out typ (encode value)
       | Versions { current; _ } ->
           output_value ~mode ~context out current value
+      | Annotate (_, typ) ->
+          output_value ~mode ~context out typ value
+      | Recursive f | Expanded_recursive (_, f) ->
+          output_value ~mode ~context out (f typ) value
 
 let show_value ?mode ?context typ value =
   let buffer = Buffer.create 512 in
@@ -721,6 +814,10 @@ let rec example_value: 'a. empty: bool -> 'a t -> 'a =
         )
     | Versions { current; _ } ->
         example_value ~empty current
+    | Annotate (_, typ) ->
+        example_value ~empty typ
+    | Recursive f | Expanded_recursive (_, f) ->
+        example_value ~empty: true (f typ)
 
 let example_value ?(empty = false) typ =
   example_value ~empty typ
@@ -766,3 +863,7 @@ let rec copy_value: 'a. 'a t -> 'a -> 'a = fun (type a) (typ: a t) (value: a) ->
         )
     | Versions { current; _ } ->
         copy_value current value
+    | Annotate (_, typ) ->
+        copy_value typ value
+    | Recursive f | Expanded_recursive (_, f) ->
+        copy_value (f typ) value

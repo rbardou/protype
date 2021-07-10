@@ -51,11 +51,29 @@ type version = int
 
 module Version_map: Map.S with type key = version
 
+(** Type annotations.
+
+    Use this with [Annotate] to attach information to a type.
+    For instance, you can write:
+    {[
+      type vector = { x: int; y: int }
+      type _ annotation += Vector: vector annotation
+    ]}
+    and annotate your [vector Protype.t] with [Vector] to be able to detect
+    all vectors in any ['a Protype.t]. *)
+type _ annotation = ..
+
 (** Type descriptions.
 
     This type is provided in case you want to build your own encoders and decoders.
     You can build values of type [t] directly, but it may be more convenient to use
-    the constructor functions below (which also document each case). *)
+    the constructor functions below (which also document each case).
+
+    When working with recursive types [typ = Recursive f], you should recurse on [f typ].
+    However, for some use cases such as generating documentation or printing types,
+    you should recurse on [f (expand_recursive f)] instead and not expand
+    [Expanded_recursive] anymore. [Expanded_recursive] should not be used for other
+    purposes. *)
 type _ t =
   | Unit: unit t
   | Bool: bool t
@@ -94,6 +112,9 @@ type _ t =
       from: version;
       current: 'a t;
     } -> 'a t
+  | Annotate: 'a annotation * 'a t -> 'a t
+  | Recursive: ('a t -> 'a t) -> 'a t
+  | Expanded_recursive: int * ('a t -> 'a t) -> 'a t
 
 (** Field descriptions for [Record] types. *)
 and (_, _) fields =
@@ -459,6 +480,43 @@ val show_issue: issue -> string
     - renamings ([rename] information) are used to decode old names. *)
 val backward_compatible: old: 'a t -> old_version: version -> 'b t -> issue list
 
+(** {2 Annotations} *)
+
+(** Annotate a type with a type annotation. *)
+val annotate: 'a annotation -> 'a t -> 'a t
+
+(** Equality predicates on annotations, for use with [find_all]. *)
+type 'a annotation_equality =
+  {
+    equal: 'b. 'b -> 'b annotation -> 'a option;
+  }
+
+(** Find all occurrences of values of a given type in a another value.
+
+    Example for a type named [t] with [t: t Protype.t] and [T: t Protype.annotation]:
+    {[
+      let equal: 'a. 'a -> 'a Protype.annotation -> t option =
+        fun (type a) (x: a) (annotation: a Protype.annotation): t option ->
+          match annotation with
+            | T -> Some x
+            | _ -> None
+      in
+      find_all { equal } t value
+    ]}
+
+    This finds all sub-values [subvalue] of [value] for which [typ] is
+    [Annotate (annotation, _)]. This does not recurse inside [subvalue] itself. *)
+val find_all: 'a annotation_equality -> 'b t -> 'b -> 'a list
+
+(** {2 Recursive Types} *)
+
+(** Make a recursive type as a fixpoint of a function. *)
+val recursive: ('a t -> 'a t) -> 'a t
+
+(** Same as [recursive], but produce a value that should not be expanded further
+    for use cases such as generating documentation. *)
+val expand_recursive: ('a t -> 'a t) -> 'a t
+
 (** {2 Some Uses of Types} *)
 
 (** Output modes for [output_value]. *)
@@ -503,6 +561,8 @@ val show_value: ?mode: output_mode -> ?context: output_context ->
 
     If [empty] is [true], lists, arrays and options are generated empty.
     Otherwise, they are generated with one element. Default is [false].
+    However lists, arrays and options that occur inside recursive types
+    are always generated empty.
 
     @raise [Invalid_argument] if given an empty [Enum] or [Variant] list
     of cases, or if given [Convert] such that [decode] cannot convert
