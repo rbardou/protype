@@ -1,3 +1,10 @@
 (library
  (name protype)
- (public_name protype))
+ (public_name protype)
+ (modules Protype))
+
+(library
+ (name protype_tests)
+ (public_name protype-tests)
+ (libraries protype)
+ (modules Protype_tests))
